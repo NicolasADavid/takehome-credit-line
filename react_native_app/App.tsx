@@ -39,15 +39,17 @@ function moneyWhole(cents: number) {
   return wholeCurrency.format(cents / 100);
 }
 
-// Experiment 1 arms for members with headroom. `request` is the shipped flow;
-// `pre-approved` presents the same capped increase as an offer to accept. In
+// Members are in one of two experiments, decided by headroom at signup.
+// Experiment 1 (headroom): A is the shipped request flow; B presents the same
+// capped increase as a pre-approved offer. Experiment 2 (at their max): A shows
+// nothing, as shipped; B explains that the member is at their maximum. In
 // production the arm comes from assignment; here it's a demo control on Home.
-const arms = [
-  { value: 'request', label: 'A: Request' },
-  { value: 'pre-approved', label: 'B: Pre-approved' },
-] as const;
+type Arm = 'A' | 'B';
 
-type Arm = (typeof arms)[number]['value'];
+const armLabels = {
+  headroom: { A: 'A: Request', B: 'B: Pre-approved' },
+  atMax: { A: 'A: No button', B: 'B: At-max message' },
+} as const;
 
 function numberField(object: JsonObject | null, key: string) {
   const value = object?.[key];
@@ -69,7 +71,7 @@ function maxIncreaseCents(account: JsonObject | null) {
 export default function App() {
   const api = useMemo(() => new ApiClient(), []);
   const [screen, setScreen] = useState<Screen>({ name: 'home', refreshKey: 0 });
-  const [arm, setArm] = useState<Arm>('request');
+  const [arm, setArm] = useState<Arm>('A');
   const showResult = (result: ApiResult | null, error: string | null) =>
     setScreen({ name: 'result', result, error });
 
@@ -90,7 +92,7 @@ export default function App() {
           onArmChange={setArm}
           refreshKey={screen.refreshKey}
           onRequest={(limitCents, maxIncreaseCents) =>
-            setScreen(arm === 'pre-approved'
+            setScreen(arm === 'B'
               ? { name: 'offer', limitCents, maxIncreaseCents }
               : { name: 'request', limitCents, maxIncreaseCents })}
         />
@@ -169,11 +171,14 @@ function HomePage({
 
   const limit = numberField(account, 'limit_cents');
   const spent = numberField(account, 'balance_cents');
+  const available = Math.max(0, limit - spent - numberField(account, 'pending_holds_cents'));
   const alreadyRequested = account?.increase_request != null;
   const maxIncrease = maxIncreaseCents(account);
   // Members without room for the smallest increase would only ever be
-  // declined, so they get the control experience: no Increase button.
+  // declined, so they never get an Increase button (experiment 2).
   const canRequest = !alreadyRequested && maxIncrease >= MIN_INCREASE_CENTS;
+  const atMax = account != null && !alreadyRequested && !canRequest;
+  const labels = atMax ? armLabels.atMax : armLabels.headroom;
 
   return (
     <View style={styles.page}>
@@ -192,7 +197,9 @@ function HomePage({
         </View>
       ) : (
         <View style={styles.flex}>
-          {canRequest && arm === 'pre-approved' ? (
+          {atMax && arm === 'B' ? (
+            <AtMaxCard limitCents={limit} availableCents={available} />
+          ) : canRequest && arm === 'B' ? (
             <OfferCard
               limitCents={limit}
               maxIncreaseCents={maxIncrease}
@@ -213,20 +220,20 @@ function HomePage({
       <View style={styles.personaRow}>
         <Text style={type.label}>ARM</Text>
         <View style={styles.segments}>
-          {arms.map((option) => (
+          {(['A', 'B'] as const).map((option) => (
             <Pressable
               accessibilityRole="button"
-              accessibilityState={{ selected: option.value === arm }}
-              key={option.value}
-              onPress={() => onArmChange(option.value)}
+              accessibilityState={{ selected: option === arm }}
+              key={option}
+              onPress={() => onArmChange(option)}
               style={({ pressed }) => [
                 styles.segment,
-                option.value === arm && styles.segmentSelected,
+                option === arm && styles.segmentSelected,
                 pressed && styles.pressed,
               ]}
             >
-              <Text style={option.value === arm ? type.small : [type.small, styles.segmentIdle]}>
-                {option.label}
+              <Text style={option === arm ? type.small : [type.small, styles.segmentIdle]}>
+                {labels[option]}
               </Text>
             </Pressable>
           ))}
@@ -347,6 +354,27 @@ function OfferCard({
       </Text>
       <View style={styles.mediumGap} />
       <PrimaryButton label="See your offer" onPress={onPress} />
+    </View>
+  );
+}
+
+function AtMaxCard({ limitCents, availableCents }: { limitCents: number; availableCents: number }) {
+  return (
+    <View style={styles.card}>
+      <Text style={type.label}>YOUR LIMIT</Text>
+      <View style={styles.tinyGap} />
+      <Text style={type.heading}>{"You're at your maximum limit"}</Text>
+      <View style={styles.tinyGap} />
+      <Text style={type.bodyMuted}>
+        {'Your maximum was set when you joined, and your ' + moneyWhole(limitCents) +
+          " limit has reached it, so an increase isn't available on this account."}
+      </Text>
+      <View style={styles.smallGap} />
+      <Text style={type.bodyMuted}>
+        {"Nothing here checks your credit, and there's nothing you need to do."}
+      </Text>
+      <View style={styles.divider} />
+      <AccountRow label="Available to spend" value={money(availableCents)} />
     </View>
   );
 }
