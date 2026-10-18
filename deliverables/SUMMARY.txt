@@ -6,8 +6,8 @@ Framework used: React Native (react_native_app/). The Flutter app, mock API,
 design tokens and data are unchanged.
 
 
-DECISIONS.pdf
--------------
+deliverables/DECISIONS.pdf
+--------------------------
 The one-page ship decision. Ship the increase feature only to members with
 headroom (max eligible limit above their starting limit, ~77% of members) and
 cap the slider at that room; members already at their max keep the control
@@ -82,6 +82,7 @@ reset requests.
 
 deliverables/
 -------------
+  DECISIONS.pdf     The ship decision, described at the top of this file.
   SUMMARY.txt       This file.
   AI_TRANSCRIPT.md  The AI usage transcript: the main Claude Code session
                     (data analysis, ship decision, experiments, app changes).
