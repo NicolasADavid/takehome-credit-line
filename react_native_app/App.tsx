@@ -17,6 +17,7 @@ import { color, radius, space, type } from './src/tokens';
 type Screen =
   | { name: 'home'; refreshKey: number }
   | { name: 'request'; limitCents: number; maxIncreaseCents: number }
+  | { name: 'offer'; limitCents: number; maxIncreaseCents: number }
   | { name: 'result'; result: ApiResult | null; error: string | null };
 
 const currency = new Intl.NumberFormat('en-US', {
@@ -38,6 +39,16 @@ function moneyWhole(cents: number) {
   return wholeCurrency.format(cents / 100);
 }
 
+// Experiment 1 arms for members with headroom. `request` is the shipped flow;
+// `pre-approved` presents the same capped increase as an offer to accept. In
+// production the arm comes from assignment; here it's a demo control on Home.
+const arms = [
+  { value: 'request', label: 'A: Request' },
+  { value: 'pre-approved', label: 'B: Pre-approved' },
+] as const;
+
+type Arm = (typeof arms)[number]['value'];
+
 function numberField(object: JsonObject | null, key: string) {
   const value = object?.[key];
   return typeof value === 'number' ? value : 0;
@@ -58,6 +69,9 @@ function maxIncreaseCents(account: JsonObject | null) {
 export default function App() {
   const api = useMemo(() => new ApiClient(), []);
   const [screen, setScreen] = useState<Screen>({ name: 'home', refreshKey: 0 });
+  const [arm, setArm] = useState<Arm>('request');
+  const showResult = (result: ApiResult | null, error: string | null) =>
+    setScreen({ name: 'result', result, error });
 
   const goHome = () => {
     setScreen((current) => ({
@@ -72,9 +86,13 @@ export default function App() {
       {screen.name === 'home' ? (
         <HomePage
           api={api}
+          arm={arm}
+          onArmChange={setArm}
           refreshKey={screen.refreshKey}
           onRequest={(limitCents, maxIncreaseCents) =>
-            setScreen({ name: 'request', limitCents, maxIncreaseCents })}
+            setScreen(arm === 'pre-approved'
+              ? { name: 'offer', limitCents, maxIncreaseCents }
+              : { name: 'request', limitCents, maxIncreaseCents })}
         />
       ) : screen.name === 'request' ? (
         <RequestPage
@@ -82,7 +100,15 @@ export default function App() {
           limitCents={screen.limitCents}
           maxIncreaseCents={screen.maxIncreaseCents}
           onBack={goHome}
-          onResult={(result, error) => setScreen({ name: 'result', result, error })}
+          onResult={showResult}
+        />
+      ) : screen.name === 'offer' ? (
+        <OfferPage
+          api={api}
+          limitCents={screen.limitCents}
+          maxIncreaseCents={screen.maxIncreaseCents}
+          onBack={goHome}
+          onResult={showResult}
         />
       ) : (
         <ResultPage result={screen.result} error={screen.error} onDone={goHome} />
@@ -93,10 +119,14 @@ export default function App() {
 
 function HomePage({
   api,
+  arm,
+  onArmChange,
   refreshKey,
   onRequest,
 }: {
   api: ApiClient;
+  arm: Arm;
+  onArmChange: (arm: Arm) => void;
   refreshKey: number;
   onRequest: (limitCents: number, maxIncreaseCents: number) => void;
 }) {
@@ -162,7 +192,13 @@ function HomePage({
         </View>
       ) : (
         <View style={styles.flex}>
-          {canRequest ? (
+          {canRequest && arm === 'pre-approved' ? (
+            <OfferCard
+              limitCents={limit}
+              maxIncreaseCents={maxIncrease}
+              onPress={() => onRequest(limit, maxIncrease)}
+            />
+          ) : canRequest ? (
             <PrimaryButton label="Increase" onPress={() => onRequest(limit, maxIncrease)} />
           ) : null}
           <View style={styles.mediumGap} />
@@ -174,6 +210,28 @@ function HomePage({
         </View>
       )}
 
+      <View style={styles.personaRow}>
+        <Text style={type.label}>ARM</Text>
+        <View style={styles.segments}>
+          {arms.map((option) => (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ selected: option.value === arm }}
+              key={option.value}
+              onPress={() => onArmChange(option.value)}
+              style={({ pressed }) => [
+                styles.segment,
+                option.value === arm && styles.segmentSelected,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={option.value === arm ? type.small : [type.small, styles.segmentIdle]}>
+                {option.label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      </View>
       <View style={styles.personaRow}>
         <Text style={type.label}>PERSONA</Text>
         <Pressable
@@ -231,23 +289,8 @@ function RequestPage({
   onBack: () => void;
   onResult: (result: ApiResult | null, error: string | null) => void;
 }) {
-  const minDollars = MIN_INCREASE_CENTS / 100;
-  const maxDollars = maxIncreaseCents / 100;
-  const [amountDollars, setAmountDollars] = useState(Math.min(500, maxDollars));
-  const [submitting, setSubmitting] = useState(false);
-  const increase = Math.round(amountDollars * 100);
-
-  const submit = async () => {
-    setSubmitting(true);
-    try {
-      const result = await api.submitIncreaseRequest(increase);
-      setSubmitting(false);
-      onResult(result, null);
-    } catch {
-      setSubmitting(false);
-      onResult(null, 'Could not reach the mock API.');
-    }
-  };
+  const [increase, setIncrease] = useState(Math.min(50000, maxIncreaseCents));
+  const { submitting, submit } = useSubmitIncrease(api, onResult);
 
   return (
     <View style={styles.page}>
@@ -258,25 +301,8 @@ function RequestPage({
         <Text style={[type.label, styles.centerText]}>INCREASE BY</Text>
         <View style={styles.tinyGap} />
         <Text style={[type.display, styles.centerText]}>{moneyWhole(increase)}</Text>
-        {maxDollars > minDollars ? (
-          <>
-            <Slider
-              accessibilityLabel="Increase amount"
-              maximumTrackTintColor={color.rule}
-              maximumValue={maxDollars}
-              minimumTrackTintColor={color.accent}
-              minimumValue={minDollars}
-              onValueChange={setAmountDollars}
-              step={STEP_CENTS / 100}
-              style={styles.slider}
-              thumbTintColor={color.accent}
-              value={amountDollars}
-            />
-            <View style={styles.sliderBounds}>
-              <Text style={type.small}>{moneyWhole(MIN_INCREASE_CENTS)}</Text>
-              <Text style={type.small}>{moneyWhole(maxIncreaseCents)}</Text>
-            </View>
-          </>
+        {maxIncreaseCents > MIN_INCREASE_CENTS ? (
+          <IncreaseSlider value={increase} maxCents={maxIncreaseCents} onChange={setIncrease} />
         ) : (
           <View style={styles.mediumGap} />
         )}
@@ -293,10 +319,147 @@ function RequestPage({
       <PrimaryButton
         disabled={submitting}
         label={submitting ? 'Submitting…' : 'Submit'}
-        onPress={submit}
+        onPress={() => submit(increase)}
       />
     </View>
   );
+}
+
+function OfferCard({
+  limitCents,
+  maxIncreaseCents,
+  onPress,
+}: {
+  limitCents: number;
+  maxIncreaseCents: number;
+  onPress: () => void;
+}) {
+  return (
+    <View style={[styles.card, styles.offerCard]}>
+      <Text style={type.label}>PRE-APPROVED</Text>
+      <View style={styles.tinyGap} />
+      <Text style={type.heading}>
+        {'Raise your limit to ' + moneyWhole(limitCents + maxIncreaseCents)}
+      </Text>
+      <View style={styles.tinyGap} />
+      <Text style={type.bodyMuted}>
+        {"That's " + moneyWhole(maxIncreaseCents) + ' more to work with. No application needed.'}
+      </Text>
+      <View style={styles.mediumGap} />
+      <PrimaryButton label="See your offer" onPress={onPress} />
+    </View>
+  );
+}
+
+function OfferPage({
+  api,
+  limitCents,
+  maxIncreaseCents,
+  onBack,
+  onResult,
+}: {
+  api: ApiClient;
+  limitCents: number;
+  maxIncreaseCents: number;
+  onBack: () => void;
+  onResult: (result: ApiResult | null, error: string | null) => void;
+}) {
+  const [increase, setIncrease] = useState(maxIncreaseCents);
+  const [choosing, setChoosing] = useState(false);
+  const { submitting, submit } = useSubmitIncrease(api, onResult);
+
+  return (
+    <View style={styles.page}>
+      <BackButton onPress={onBack} />
+      <Text style={type.title}>{"You're pre-approved"}</Text>
+      <View style={styles.topGap} />
+      <View style={styles.card}>
+        <Text style={[type.label, styles.centerText]}>NEW CREDIT LIMIT</Text>
+        <View style={styles.tinyGap} />
+        <Text style={[type.display, styles.centerText]}>{moneyWhole(limitCents + increase)}</Text>
+        <View style={styles.tinyGap} />
+        <Text style={[type.small, styles.centerText]}>
+          {'Up from ' + moneyWhole(limitCents) + ' (+' + moneyWhole(increase) + ')'}
+        </Text>
+        {choosing ? (
+          <IncreaseSlider value={increase} maxCents={maxIncreaseCents} onChange={setIncrease} />
+        ) : null}
+      </View>
+      {!choosing && maxIncreaseCents > MIN_INCREASE_CENTS ? (
+        <Pressable
+          accessibilityRole="button"
+          hitSlop={8}
+          onPress={() => setChoosing(true)}
+          style={({ pressed }) => [styles.linkButton, pressed && styles.pressed]}
+        >
+          <Text style={styles.linkText}>Choose a smaller amount</Text>
+        </Pressable>
+      ) : null}
+      <View style={styles.mediumGap} />
+      <Text style={type.bodyMuted}>
+        Accepting runs a soft inquiry, which won't affect your credit score. Your new limit is
+        ready to use right away.
+      </Text>
+      <View style={styles.flex} />
+      <PrimaryButton
+        disabled={submitting}
+        label={submitting ? 'Accepting…' : 'Accept ' + moneyWhole(limitCents + increase) + ' limit'}
+        onPress={() => submit(increase)}
+      />
+    </View>
+  );
+}
+
+function IncreaseSlider({
+  value,
+  maxCents,
+  onChange,
+}: {
+  value: number;
+  maxCents: number;
+  onChange: (cents: number) => void;
+}) {
+  return (
+    <>
+      <Slider
+        accessibilityLabel="Increase amount"
+        maximumTrackTintColor={color.rule}
+        maximumValue={maxCents / 100}
+        minimumTrackTintColor={color.accent}
+        minimumValue={MIN_INCREASE_CENTS / 100}
+        onValueChange={(dollars) => onChange(Math.round(dollars * 100))}
+        step={STEP_CENTS / 100}
+        style={styles.slider}
+        thumbTintColor={color.accent}
+        value={value / 100}
+      />
+      <View style={styles.sliderBounds}>
+        <Text style={type.small}>{moneyWhole(MIN_INCREASE_CENTS)}</Text>
+        <Text style={type.small}>{moneyWhole(maxCents)}</Text>
+      </View>
+    </>
+  );
+}
+
+function useSubmitIncrease(
+  api: ApiClient,
+  onResult: (result: ApiResult | null, error: string | null) => void,
+) {
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async (increaseCents: number) => {
+    setSubmitting(true);
+    try {
+      const result = await api.submitIncreaseRequest(increaseCents);
+      setSubmitting(false);
+      onResult(result, null);
+    } catch {
+      setSubmitting(false);
+      onResult(null, 'Could not reach the mock API.');
+    }
+  };
+
+  return { submitting, submit };
 }
 
 function ResultPage({
@@ -474,6 +637,40 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
   },
+  offerCard: {
+    backgroundColor: color.accentSoft,
+    borderColor: color.accentSoft,
+  },
+  linkButton: {
+    alignSelf: 'center',
+    marginTop: space.s3,
+    minHeight: 44,
+    justifyContent: 'center',
+  },
+  linkText: {
+    ...type.body,
+    color: color.accent,
+    fontWeight: '600',
+  },
+  segments: {
+    flex: 1,
+    flexDirection: 'row',
+    gap: space.s2,
+    justifyContent: 'flex-end',
+  },
+  segment: {
+    borderColor: color.rule,
+    borderRadius: radius,
+    borderWidth: 1,
+    minHeight: 32,
+    justifyContent: 'center',
+    paddingHorizontal: space.s3,
+  },
+  segmentSelected: {
+    backgroundColor: color.accentSoft,
+    borderColor: color.accent,
+  },
+  segmentIdle: { color: color.ink3 },
   backButton: {
     alignItems: 'center',
     height: 36,
