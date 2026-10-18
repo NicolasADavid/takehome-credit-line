@@ -208,7 +208,7 @@ function HomePage({
           ) : canRequest ? (
             <PrimaryButton label="Increase" onPress={() => onRequest(limit, maxIncrease)} />
           ) : null}
-          <View style={styles.mediumGap} />
+          {canRequest || (atMax && arm === 'B') ? <View style={styles.mediumGap} /> : null}
           <View style={styles.card}>
             <AccountRow label="Credit limit" value={money(limit)} />
             <View style={styles.divider} />
