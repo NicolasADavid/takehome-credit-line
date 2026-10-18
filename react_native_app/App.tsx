@@ -16,7 +16,7 @@ import { color, radius, space, type } from './src/tokens';
 
 type Screen =
   | { name: 'home'; refreshKey: number }
-  | { name: 'request'; limitCents: number }
+  | { name: 'request'; limitCents: number; maxIncreaseCents: number }
   | { name: 'result'; result: ApiResult | null; error: string | null };
 
 const currency = new Intl.NumberFormat('en-US', {
@@ -43,6 +43,18 @@ function numberField(object: JsonObject | null, key: string) {
   return typeof value === 'number' ? value : 0;
 }
 
+// Bounds the increase-requests endpoint accepts.
+const MIN_INCREASE_CENTS = 10000;
+const MAX_INCREASE_CENTS = 250000;
+const STEP_CENTS = 5000;
+
+// The largest increase that keeps the member at or under their maximum eligible
+// limit. Anything above it is always declined, so the app never offers it.
+function maxIncreaseCents(account: JsonObject | null) {
+  const room = numberField(account, 'max_eligible_limit_cents') - numberField(account, 'limit_cents');
+  return Math.min(MAX_INCREASE_CENTS, Math.floor(room / STEP_CENTS) * STEP_CENTS);
+}
+
 export default function App() {
   const api = useMemo(() => new ApiClient(), []);
   const [screen, setScreen] = useState<Screen>({ name: 'home', refreshKey: 0 });
@@ -61,12 +73,14 @@ export default function App() {
         <HomePage
           api={api}
           refreshKey={screen.refreshKey}
-          onRequest={(limitCents) => setScreen({ name: 'request', limitCents })}
+          onRequest={(limitCents, maxIncreaseCents) =>
+            setScreen({ name: 'request', limitCents, maxIncreaseCents })}
         />
       ) : screen.name === 'request' ? (
         <RequestPage
           api={api}
           limitCents={screen.limitCents}
+          maxIncreaseCents={screen.maxIncreaseCents}
           onBack={goHome}
           onResult={(result, error) => setScreen({ name: 'result', result, error })}
         />
@@ -84,7 +98,7 @@ function HomePage({
 }: {
   api: ApiClient;
   refreshKey: number;
-  onRequest: (limitCents: number) => void;
+  onRequest: (limitCents: number, maxIncreaseCents: number) => void;
 }) {
   const [account, setAccount] = useState<JsonObject | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -126,6 +140,10 @@ function HomePage({
   const limit = numberField(account, 'limit_cents');
   const spent = numberField(account, 'balance_cents');
   const alreadyRequested = account?.increase_request != null;
+  const maxIncrease = maxIncreaseCents(account);
+  // Members without room for the smallest increase would only ever be
+  // declined, so they get the control experience: no Increase button.
+  const canRequest = !alreadyRequested && maxIncrease >= MIN_INCREASE_CENTS;
 
   return (
     <View style={styles.page}>
@@ -144,8 +162,8 @@ function HomePage({
         </View>
       ) : (
         <View style={styles.flex}>
-          {!alreadyRequested ? (
-            <PrimaryButton label="Increase" onPress={() => onRequest(limit)} />
+          {canRequest ? (
+            <PrimaryButton label="Increase" onPress={() => onRequest(limit, maxIncrease)} />
           ) : null}
           <View style={styles.mediumGap} />
           <View style={styles.card}>
@@ -203,15 +221,19 @@ function HomePage({
 function RequestPage({
   api,
   limitCents,
+  maxIncreaseCents,
   onBack,
   onResult,
 }: {
   api: ApiClient;
   limitCents: number;
+  maxIncreaseCents: number;
   onBack: () => void;
   onResult: (result: ApiResult | null, error: string | null) => void;
 }) {
-  const [amountDollars, setAmountDollars] = useState(500);
+  const minDollars = MIN_INCREASE_CENTS / 100;
+  const maxDollars = maxIncreaseCents / 100;
+  const [amountDollars, setAmountDollars] = useState(Math.min(500, maxDollars));
   const [submitting, setSubmitting] = useState(false);
   const increase = Math.round(amountDollars * 100);
 
@@ -236,22 +258,37 @@ function RequestPage({
         <Text style={[type.label, styles.centerText]}>INCREASE BY</Text>
         <View style={styles.tinyGap} />
         <Text style={[type.display, styles.centerText]}>{moneyWhole(increase)}</Text>
-        <Slider
-          accessibilityLabel="Increase amount"
-          maximumTrackTintColor={color.rule}
-          maximumValue={2500}
-          minimumTrackTintColor={color.accent}
-          minimumValue={100}
-          onValueChange={setAmountDollars}
-          step={50}
-          style={styles.slider}
-          thumbTintColor={color.accent}
-          value={amountDollars}
-        />
+        {maxDollars > minDollars ? (
+          <>
+            <Slider
+              accessibilityLabel="Increase amount"
+              maximumTrackTintColor={color.rule}
+              maximumValue={maxDollars}
+              minimumTrackTintColor={color.accent}
+              minimumValue={minDollars}
+              onValueChange={setAmountDollars}
+              step={STEP_CENTS / 100}
+              style={styles.slider}
+              thumbTintColor={color.accent}
+              value={amountDollars}
+            />
+            <View style={styles.sliderBounds}>
+              <Text style={type.small}>{moneyWhole(MIN_INCREASE_CENTS)}</Text>
+              <Text style={type.small}>{moneyWhole(maxIncreaseCents)}</Text>
+            </View>
+          </>
+        ) : (
+          <View style={styles.mediumGap} />
+        )}
+        <View style={styles.smallGap} />
         <Text style={[type.small, styles.centerText]}>
           {'New limit if approved: ' + money(limitCents + increase)}
         </Text>
       </View>
+      <View style={styles.mediumGap} />
+      <Text style={type.bodyMuted}>
+        {'You can increase your limit by up to ' + moneyWhole(maxIncreaseCents) + '.'}
+      </Text>
       <View style={styles.flex} />
       <PrimaryButton
         disabled={submitting}
@@ -430,8 +467,12 @@ const styles = StyleSheet.create({
   pressed: { opacity: 0.72 },
   slider: {
     height: 44,
-    marginVertical: space.s2,
+    marginTop: space.s2,
     width: '100%',
+  },
+  sliderBounds: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
   },
   backButton: {
     alignItems: 'center',
