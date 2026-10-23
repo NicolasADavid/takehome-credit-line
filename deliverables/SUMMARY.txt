@@ -1,0 +1,88 @@
+CREDIT LINE INCREASE TAKE-HOME: FILES AND FOLDERS ADDED
+=======================================================
+
+Everything below was added or changed on top of the provided starter repo.
+Framework used: React Native (react_native_app/). The Flutter app, mock API,
+design tokens and data are unchanged.
+
+
+deliverables/DECISIONS.pdf
+--------------------------
+The one-page ship decision. Ship the increase feature only to members with
+headroom (max eligible limit above their starting limit, ~77% of members) and
+cap the slider at that room; members already at their max keep the control
+experience. Evidence: within every headroom band, which is fixed at signup
+and so still randomized, members with headroom retained +5.9 to +6.3 pp
+better at 30 days and +7.3 to +7.6 pp at 60 days, while members at their max
+retained 18 to 26 pp worse. Expected effect: about +4.6 pp retention at 30
+days and +5.7 pp at 60 days across all members. Also lists the two next
+experiments.
+
+
+analysis/
+---------
+Python scripts (standard library only) that produced the numbers in the
+PDFs. Both read the CSVs one row at a time and keep only totals in memory.
+
+  retention_by_group.py
+      Retention by experiment group: open at snapshot, plus 7/14/30/60-day
+      retention counting only members observed for the full window, with
+      treatment-minus-control differences and 95% confidence intervals.
+      Run: python3 analysis/retention_by_group.py
+
+  requests_breakdown.py
+      Joins requests.csv to users.csv: data integrity checks, request
+      funnel, retention by request outcome, retention by headroom band
+      (treatment vs. control), outcome by days since joining, approval rate
+      by requested limit vs. max, and what happens after a decline.
+      Run: python3 analysis/requests_breakdown.py
+
+
+experiments/
+------------
+One PDF per next experiment. Page 1 explains the experiment (hypothesis,
+background, arms, metrics, sample size, ship rule); page 2 shows screenshots
+of each arm; page 3 explains how to try both arms in the app.
+
+  experiment-1-pre-approved-offer.pdf
+      Members with headroom. A = the shipped request flow with the slider
+      capped at their room. B = a pre-approved offer with one-tap accept.
+
+  experiment-2-at-max-message.pdf
+      Members at their max. A = no Increase button (shipped). B = an honest
+      "You're at your maximum limit" card, with no credit check or decline,
+      showing available to spend.
+
+  screenshots/
+      The designs: screenshots of every screen in each arm, captured from
+      the running app (e1-* for experiment 1, e2-* for experiment 2).
+
+
+react_native_app/App.tsx  (changed)
+-----------------------------------
+All app changes are in this one file; there are no API changes.
+  - Ship decision: the Increase button appears only for members with at
+    least $100 of room (max_eligible_limit_cents - limit_cents), and the
+    slider is capped at that room, so no request can be declined.
+  - Experiment 1, arm B: PRE-APPROVED card on Home and an offer screen
+    (OfferCard, OfferPage), defaulting to the full amount, with an option
+    to choose a smaller amount.
+  - Experiment 2, arm B: at-max card on Home (AtMaxCard).
+  - An ARM A/B control on Home for demos. Its labels follow the persona's
+    experiment, which is decided by headroom.
+  - Both arms of experiment 1 share the capped slider (IncreaseSlider) and
+    submit logic (useSubmitIncrease).
+
+To try it:
+  cd mock-api && npm start
+  cd react_native_app && npm install && npm run web
+Then use the PERSONA and ARM controls on Home. Restart the mock API to
+reset requests.
+
+
+deliverables/
+-------------
+  DECISIONS.pdf     The ship decision, described at the top of this file.
+  SUMMARY.txt       This file.
+  AI_TRANSCRIPT.md  The AI usage transcript: the main Claude Code session
+                    (data analysis, ship decision, experiments, app changes).

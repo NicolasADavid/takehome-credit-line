@@ -16,7 +16,8 @@ import { color, radius, space, type } from './src/tokens';
 
 type Screen =
   | { name: 'home'; refreshKey: number }
-  | { name: 'request'; limitCents: number }
+  | { name: 'request'; limitCents: number; maxIncreaseCents: number }
+  | { name: 'offer'; limitCents: number; maxIncreaseCents: number }
   | { name: 'result'; result: ApiResult | null; error: string | null };
 
 const currency = new Intl.NumberFormat('en-US', {
@@ -38,14 +39,41 @@ function moneyWhole(cents: number) {
   return wholeCurrency.format(cents / 100);
 }
 
+// Members are in one of two experiments, decided by headroom at signup.
+// Experiment 1 (headroom): A is the shipped request flow; B presents the same
+// capped increase as a pre-approved offer. Experiment 2 (at their max): A shows
+// nothing, as shipped; B explains that the member is at their maximum. In
+// production the arm comes from assignment; here it's a demo control on Home.
+type Arm = 'A' | 'B';
+
+const armLabels = {
+  headroom: { A: 'A: Request', B: 'B: Pre-approved' },
+  atMax: { A: 'A: No button', B: 'B: At-max message' },
+} as const;
+
 function numberField(object: JsonObject | null, key: string) {
   const value = object?.[key];
   return typeof value === 'number' ? value : 0;
 }
 
+// Bounds the increase-requests endpoint accepts.
+const MIN_INCREASE_CENTS = 10000;
+const MAX_INCREASE_CENTS = 250000;
+const STEP_CENTS = 5000;
+
+// The largest increase that keeps the member at or under their maximum eligible
+// limit. Anything above it is always declined, so the app never offers it.
+function maxIncreaseCents(account: JsonObject | null) {
+  const room = numberField(account, 'max_eligible_limit_cents') - numberField(account, 'limit_cents');
+  return Math.min(MAX_INCREASE_CENTS, Math.floor(room / STEP_CENTS) * STEP_CENTS);
+}
+
 export default function App() {
   const api = useMemo(() => new ApiClient(), []);
   const [screen, setScreen] = useState<Screen>({ name: 'home', refreshKey: 0 });
+  const [arm, setArm] = useState<Arm>('A');
+  const showResult = (result: ApiResult | null, error: string | null) =>
+    setScreen({ name: 'result', result, error });
 
   const goHome = () => {
     setScreen((current) => ({
@@ -60,15 +88,29 @@ export default function App() {
       {screen.name === 'home' ? (
         <HomePage
           api={api}
+          arm={arm}
+          onArmChange={setArm}
           refreshKey={screen.refreshKey}
-          onRequest={(limitCents) => setScreen({ name: 'request', limitCents })}
+          onRequest={(limitCents, maxIncreaseCents) =>
+            setScreen(arm === 'B'
+              ? { name: 'offer', limitCents, maxIncreaseCents }
+              : { name: 'request', limitCents, maxIncreaseCents })}
         />
       ) : screen.name === 'request' ? (
         <RequestPage
           api={api}
           limitCents={screen.limitCents}
+          maxIncreaseCents={screen.maxIncreaseCents}
           onBack={goHome}
-          onResult={(result, error) => setScreen({ name: 'result', result, error })}
+          onResult={showResult}
+        />
+      ) : screen.name === 'offer' ? (
+        <OfferPage
+          api={api}
+          limitCents={screen.limitCents}
+          maxIncreaseCents={screen.maxIncreaseCents}
+          onBack={goHome}
+          onResult={showResult}
         />
       ) : (
         <ResultPage result={screen.result} error={screen.error} onDone={goHome} />
@@ -79,12 +121,16 @@ export default function App() {
 
 function HomePage({
   api,
+  arm,
+  onArmChange,
   refreshKey,
   onRequest,
 }: {
   api: ApiClient;
+  arm: Arm;
+  onArmChange: (arm: Arm) => void;
   refreshKey: number;
-  onRequest: (limitCents: number) => void;
+  onRequest: (limitCents: number, maxIncreaseCents: number) => void;
 }) {
   const [account, setAccount] = useState<JsonObject | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -125,7 +171,14 @@ function HomePage({
 
   const limit = numberField(account, 'limit_cents');
   const spent = numberField(account, 'balance_cents');
+  const available = Math.max(0, limit - spent - numberField(account, 'pending_holds_cents'));
   const alreadyRequested = account?.increase_request != null;
+  const maxIncrease = maxIncreaseCents(account);
+  // Members without room for the smallest increase would only ever be
+  // declined, so they never get an Increase button (experiment 2).
+  const canRequest = !alreadyRequested && maxIncrease >= MIN_INCREASE_CENTS;
+  const atMax = account != null && !alreadyRequested && !canRequest;
+  const labels = atMax ? armLabels.atMax : armLabels.headroom;
 
   return (
     <View style={styles.page}>
@@ -144,10 +197,18 @@ function HomePage({
         </View>
       ) : (
         <View style={styles.flex}>
-          {!alreadyRequested ? (
-            <PrimaryButton label="Increase" onPress={() => onRequest(limit)} />
+          {atMax && arm === 'B' ? (
+            <AtMaxCard limitCents={limit} availableCents={available} />
+          ) : canRequest && arm === 'B' ? (
+            <OfferCard
+              limitCents={limit}
+              maxIncreaseCents={maxIncrease}
+              onPress={() => onRequest(limit, maxIncrease)}
+            />
+          ) : canRequest ? (
+            <PrimaryButton label="Increase" onPress={() => onRequest(limit, maxIncrease)} />
           ) : null}
-          <View style={styles.mediumGap} />
+          {canRequest || (atMax && arm === 'B') ? <View style={styles.mediumGap} /> : null}
           <View style={styles.card}>
             <AccountRow label="Credit limit" value={money(limit)} />
             <View style={styles.divider} />
@@ -156,6 +217,28 @@ function HomePage({
         </View>
       )}
 
+      <View style={styles.personaRow}>
+        <Text style={type.label}>ARM</Text>
+        <View style={styles.segments}>
+          {(['A', 'B'] as const).map((option) => (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ selected: option === arm }}
+              key={option}
+              onPress={() => onArmChange(option)}
+              style={({ pressed }) => [
+                styles.segment,
+                option === arm && styles.segmentSelected,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={option === arm ? type.small : [type.small, styles.segmentIdle]}>
+                {labels[option]}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      </View>
       <View style={styles.personaRow}>
         <Text style={type.label}>PERSONA</Text>
         <Pressable
@@ -203,29 +286,18 @@ function HomePage({
 function RequestPage({
   api,
   limitCents,
+  maxIncreaseCents,
   onBack,
   onResult,
 }: {
   api: ApiClient;
   limitCents: number;
+  maxIncreaseCents: number;
   onBack: () => void;
   onResult: (result: ApiResult | null, error: string | null) => void;
 }) {
-  const [amountDollars, setAmountDollars] = useState(500);
-  const [submitting, setSubmitting] = useState(false);
-  const increase = Math.round(amountDollars * 100);
-
-  const submit = async () => {
-    setSubmitting(true);
-    try {
-      const result = await api.submitIncreaseRequest(increase);
-      setSubmitting(false);
-      onResult(result, null);
-    } catch {
-      setSubmitting(false);
-      onResult(null, 'Could not reach the mock API.');
-    }
-  };
+  const [increase, setIncrease] = useState(Math.min(50000, maxIncreaseCents));
+  const { submitting, submit } = useSubmitIncrease(api, onResult);
 
   return (
     <View style={styles.page}>
@@ -236,30 +308,186 @@ function RequestPage({
         <Text style={[type.label, styles.centerText]}>INCREASE BY</Text>
         <View style={styles.tinyGap} />
         <Text style={[type.display, styles.centerText]}>{moneyWhole(increase)}</Text>
-        <Slider
-          accessibilityLabel="Increase amount"
-          maximumTrackTintColor={color.rule}
-          maximumValue={2500}
-          minimumTrackTintColor={color.accent}
-          minimumValue={100}
-          onValueChange={setAmountDollars}
-          step={50}
-          style={styles.slider}
-          thumbTintColor={color.accent}
-          value={amountDollars}
-        />
+        {maxIncreaseCents > MIN_INCREASE_CENTS ? (
+          <IncreaseSlider value={increase} maxCents={maxIncreaseCents} onChange={setIncrease} />
+        ) : (
+          <View style={styles.mediumGap} />
+        )}
+        <View style={styles.smallGap} />
         <Text style={[type.small, styles.centerText]}>
           {'New limit if approved: ' + money(limitCents + increase)}
         </Text>
       </View>
+      <View style={styles.mediumGap} />
+      <Text style={type.bodyMuted}>
+        {'You can increase your limit by up to ' + moneyWhole(maxIncreaseCents) + '.'}
+      </Text>
       <View style={styles.flex} />
       <PrimaryButton
         disabled={submitting}
         label={submitting ? 'Submitting…' : 'Submit'}
-        onPress={submit}
+        onPress={() => submit(increase)}
       />
     </View>
   );
+}
+
+function OfferCard({
+  limitCents,
+  maxIncreaseCents,
+  onPress,
+}: {
+  limitCents: number;
+  maxIncreaseCents: number;
+  onPress: () => void;
+}) {
+  return (
+    <View style={[styles.card, styles.offerCard]}>
+      <Text style={type.label}>PRE-APPROVED</Text>
+      <View style={styles.tinyGap} />
+      <Text style={type.heading}>
+        {'Raise your limit to ' + moneyWhole(limitCents + maxIncreaseCents)}
+      </Text>
+      <View style={styles.tinyGap} />
+      <Text style={type.bodyMuted}>
+        {"That's " + moneyWhole(maxIncreaseCents) + ' more to work with. No application needed.'}
+      </Text>
+      <View style={styles.mediumGap} />
+      <PrimaryButton label="See your offer" onPress={onPress} />
+    </View>
+  );
+}
+
+function AtMaxCard({ limitCents, availableCents }: { limitCents: number; availableCents: number }) {
+  return (
+    <View style={styles.card}>
+      <Text style={type.label}>YOUR LIMIT</Text>
+      <View style={styles.tinyGap} />
+      <Text style={type.heading}>{"You're at your maximum limit"}</Text>
+      <View style={styles.tinyGap} />
+      <Text style={type.bodyMuted}>
+        {'Your maximum was set when you joined, and your ' + moneyWhole(limitCents) +
+          " limit has reached it, so an increase isn't available on this account."}
+      </Text>
+      <View style={styles.smallGap} />
+      <Text style={type.bodyMuted}>
+        {"Nothing here checks your credit, and there's nothing you need to do."}
+      </Text>
+      <View style={styles.divider} />
+      <AccountRow label="Available to spend" value={money(availableCents)} />
+    </View>
+  );
+}
+
+function OfferPage({
+  api,
+  limitCents,
+  maxIncreaseCents,
+  onBack,
+  onResult,
+}: {
+  api: ApiClient;
+  limitCents: number;
+  maxIncreaseCents: number;
+  onBack: () => void;
+  onResult: (result: ApiResult | null, error: string | null) => void;
+}) {
+  const [increase, setIncrease] = useState(maxIncreaseCents);
+  const [choosing, setChoosing] = useState(false);
+  const { submitting, submit } = useSubmitIncrease(api, onResult);
+
+  return (
+    <View style={styles.page}>
+      <BackButton onPress={onBack} />
+      <Text style={type.title}>{"You're pre-approved"}</Text>
+      <View style={styles.topGap} />
+      <View style={styles.card}>
+        <Text style={[type.label, styles.centerText]}>NEW CREDIT LIMIT</Text>
+        <View style={styles.tinyGap} />
+        <Text style={[type.display, styles.centerText]}>{moneyWhole(limitCents + increase)}</Text>
+        <View style={styles.tinyGap} />
+        <Text style={[type.small, styles.centerText]}>
+          {'Up from ' + moneyWhole(limitCents) + ' (+' + moneyWhole(increase) + ')'}
+        </Text>
+        {choosing ? (
+          <IncreaseSlider value={increase} maxCents={maxIncreaseCents} onChange={setIncrease} />
+        ) : null}
+      </View>
+      {!choosing && maxIncreaseCents > MIN_INCREASE_CENTS ? (
+        <Pressable
+          accessibilityRole="button"
+          hitSlop={8}
+          onPress={() => setChoosing(true)}
+          style={({ pressed }) => [styles.linkButton, pressed && styles.pressed]}
+        >
+          <Text style={styles.linkText}>Choose a smaller amount</Text>
+        </Pressable>
+      ) : null}
+      <View style={styles.mediumGap} />
+      <Text style={type.bodyMuted}>
+        Accepting runs a soft inquiry, which won't affect your credit score. Your new limit is
+        ready to use right away.
+      </Text>
+      <View style={styles.flex} />
+      <PrimaryButton
+        disabled={submitting}
+        label={submitting ? 'Accepting…' : 'Accept ' + moneyWhole(limitCents + increase) + ' limit'}
+        onPress={() => submit(increase)}
+      />
+    </View>
+  );
+}
+
+function IncreaseSlider({
+  value,
+  maxCents,
+  onChange,
+}: {
+  value: number;
+  maxCents: number;
+  onChange: (cents: number) => void;
+}) {
+  return (
+    <>
+      <Slider
+        accessibilityLabel="Increase amount"
+        maximumTrackTintColor={color.rule}
+        maximumValue={maxCents / 100}
+        minimumTrackTintColor={color.accent}
+        minimumValue={MIN_INCREASE_CENTS / 100}
+        onValueChange={(dollars) => onChange(Math.round(dollars * 100))}
+        step={STEP_CENTS / 100}
+        style={styles.slider}
+        thumbTintColor={color.accent}
+        value={value / 100}
+      />
+      <View style={styles.sliderBounds}>
+        <Text style={type.small}>{moneyWhole(MIN_INCREASE_CENTS)}</Text>
+        <Text style={type.small}>{moneyWhole(maxCents)}</Text>
+      </View>
+    </>
+  );
+}
+
+function useSubmitIncrease(
+  api: ApiClient,
+  onResult: (result: ApiResult | null, error: string | null) => void,
+) {
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async (increaseCents: number) => {
+    setSubmitting(true);
+    try {
+      const result = await api.submitIncreaseRequest(increaseCents);
+      setSubmitting(false);
+      onResult(result, null);
+    } catch {
+      setSubmitting(false);
+      onResult(null, 'Could not reach the mock API.');
+    }
+  };
+
+  return { submitting, submit };
 }
 
 function ResultPage({
@@ -430,9 +658,47 @@ const styles = StyleSheet.create({
   pressed: { opacity: 0.72 },
   slider: {
     height: 44,
-    marginVertical: space.s2,
+    marginTop: space.s2,
     width: '100%',
   },
+  sliderBounds: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  offerCard: {
+    backgroundColor: color.accentSoft,
+    borderColor: color.accentSoft,
+  },
+  linkButton: {
+    alignSelf: 'center',
+    marginTop: space.s3,
+    minHeight: 44,
+    justifyContent: 'center',
+  },
+  linkText: {
+    ...type.body,
+    color: color.accent,
+    fontWeight: '600',
+  },
+  segments: {
+    flex: 1,
+    flexDirection: 'row',
+    gap: space.s2,
+    justifyContent: 'flex-end',
+  },
+  segment: {
+    borderColor: color.rule,
+    borderRadius: radius,
+    borderWidth: 1,
+    minHeight: 32,
+    justifyContent: 'center',
+    paddingHorizontal: space.s3,
+  },
+  segmentSelected: {
+    backgroundColor: color.accentSoft,
+    borderColor: color.accent,
+  },
+  segmentIdle: { color: color.ink3 },
   backButton: {
     alignItems: 'center',
     height: 36,
